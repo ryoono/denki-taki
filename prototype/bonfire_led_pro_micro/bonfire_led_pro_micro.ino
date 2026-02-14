@@ -21,16 +21,16 @@
  *   - Fast PWM（TOP=999, prescaler=8）
  *   - D5と逆位相の揺らぎ表現
  * 
- * D6：
+ * D2：
  *   デジタル出力（パルス制御）
  *   - 500～10000msのランダム待ち時間後にON
  *   - ON時間は40ms固定
- *   - 過電流防止のため、D7と同時ONしない
+ *   - 過電流防止のため、D4と同時ONしない
  * 
- * D7：
+ * D4：
  *   デジタル出力（パルス制御）
  *   - 動作条件はD6と同じ
- *   - D6がON中の場合は、D6がOFFになるまでONを待機
+ *   - D2がON中の場合は、D2がOFFになるまでONを待機
 */
 
 #include <Arduino.h>
@@ -67,8 +67,8 @@ static const uint8_t LED_PIN_2 = 9; // D9  (Timer1 OC1A)
 
 // ---- Digital output pins ----
 // 単純な digital output 用ピン（PWMは使わない）
-static const uint8_t DOUT_PIN_6 = 6; // D6
-static const uint8_t DOUT_PIN_7 = 7; // D7
+static const uint8_t DOUT_PIN_6 = 2; // D2
+static const uint8_t DOUT_PIN_7 = 4; // D4
 
 // ---- Digital output timing parameters ----
 // デジタル出力のON時間と待ち時間の条件
