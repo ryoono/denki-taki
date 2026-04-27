@@ -6,7 +6,7 @@
  * アルゴリズム自体はオリジナルではなく、実装方法を参考にしている。
  * https://www.creativity-ape.com/entry/2020/12/16/232928
  * 
- * ソレノイドは500~10,000msのランダム秒ごとに駆動する。
+ * ソレノイドはランダム時間ごとに駆動する。
  * ただし、過電流を防ぐため片方ずつしか駆動しないようソフトウェアでブロックしている。
  * 
  * D5：
@@ -22,14 +22,15 @@
  *   - D5と逆位相の揺らぎ表現
  * 
  * D2：
- *   デジタル出力（パルス制御）
- *   - 500～10000msのランダム待ち時間後にON
+ *   デジタル出力（パルス制御）破裂音担当
+ *   - 0～30000msのランダム待ち時間後にON
  *   - ON時間は40ms固定
  *   - 過電流防止のため、D4と同時ONしない
  * 
  * D4：
- *   デジタル出力（パルス制御）
- *   - 動作条件はD6と同じ
+ *   デジタル出力（パルス制御）折れ音担当
+ *   - 0～20000msのランダム待ち時間後にON
+ *   - ON時間は40ms固定
  *   - D2がON中の場合は、D2がOFFになるまでONを待機
 */
 
@@ -67,28 +68,32 @@ static const uint8_t LED_PIN_2 = 9; // D9  (Timer1 OC1A)
 
 // ---- Digital output pins ----
 // 単純な digital output 用ピン（PWMは使わない）
-static const uint8_t DOUT_PIN_6 = 2; // D2
-static const uint8_t DOUT_PIN_7 = 4; // D4
+static const uint8_t DOUT_PIN_2 = 2; // D2
+static const uint8_t DOUT_PIN_4 = 4; // D4
 
 // ---- Digital output timing parameters ----
 // デジタル出力のON時間と待ち時間の条件
-static const uint16_t DOUT_ON_MS      = 40;     // ONする時間 [ms]
-static const uint16_t DOUT_WAIT_MINMS = 500;    // 待ち時間の最小値 [ms]
-static const uint16_t DOUT_WAIT_MAXMS = 10000;  // 待ち時間の最大値 [ms]
+static const uint16_t DOUT_ON_MS        = 20;     // ONする時間 [ms]
+static const uint16_t DOUT_WAIT_MINMS   = 500;    // 待ち時間の最小値 [ms]）
+static const uint16_t DOUT2_WAIT_MAXMS  = 3500;  // 待ち時間の最大値 [ms]（D2: 破裂音）
+static const uint16_t DOUT4_WAIT_MAXMS  = 3000;  // 待ち時間の最大値 [ms]（D4: 折れ音）
 
 // ---- Digital output states ----
-// D6 / D7 それぞれの状態管理用変数
-static uint32_t d6NextMs = 0;
-static uint32_t d6OffMs  = 0;
-static bool     d6On     = false;
+// D2 / D4 それぞれの状態管理用変数
+static uint32_t d2NextMs = 0;
+static uint32_t d2OffMs  = 0;
+static bool     d2On     = false;
 
-static uint32_t d7NextMs = 0;
-static uint32_t d7OffMs  = 0;
-static bool     d7On     = false;
+static uint32_t d4NextMs = 0;
+static uint32_t d4OffMs  = 0;
+static bool     d4On     = false;
 
 // 待ち時間をランダムに生成するヘルパ関数
-static inline uint16_t randWaitMs() {
-  return (uint16_t)random((long)DOUT_WAIT_MINMS, (long)DOUT_WAIT_MAXMS + 1);
+static inline uint16_t randWaitMsD2() {
+  return (uint16_t)random( DOUT_WAIT_MINMS, (long)DOUT2_WAIT_MAXMS + 1L);
+}
+static inline uint16_t randWaitMsD4() {
+  return (uint16_t)random( DOUT_WAIT_MINMS, (long)DOUT4_WAIT_MAXMS + 1L);
 }
 
 // ---- Candle parameters ----
@@ -99,8 +104,14 @@ static const int   max_value     = 255;
 static const int   dimming_range = 50;   // 値を大きくするとコントラストが強くなる
 static const float threshold     = 0.065f;
 
+uint8_t duty1 = 0;
+uint8_t duty2 = 0;
+
 // 揺らぎ更新タイミング管理用
 static uint32_t nextUpdateMs = 0;
+
+// 電源投入時のフェードイン制御用
+static uint32_t bootMs = 0;
 
 // ---- Timer1 settings ----
 // Timer1 を使って PWM 周波数を正確に設定する
@@ -171,91 +182,114 @@ void setup() {
   setupTimer2PwmOnD3();
   setupTimer1PwmOnD9();
 
-  pinMode(DOUT_PIN_6, OUTPUT);
-  pinMode(DOUT_PIN_7, OUTPUT);
-  digitalWrite(DOUT_PIN_6, LOW);
-  digitalWrite(DOUT_PIN_7, LOW);
+  pinMode(DOUT_PIN_2, OUTPUT);
+  pinMode(DOUT_PIN_4, OUTPUT);
+  digitalWrite(DOUT_PIN_2, LOW);
+  digitalWrite(DOUT_PIN_4, LOW);
 
   // A0 を使って乱数の初期化（未接続前提）
   randomSeed(analogRead(A0));
   nextUpdateMs = millis();
+  bootMs = nextUpdateMs;
 
-  d6NextMs = nextUpdateMs + (uint32_t)randWaitMs();
-  d7NextMs = nextUpdateMs + (uint32_t)randWaitMs();
-}
-
-void loop() {
-  uint32_t now = millis();
-
-  // ---- D6 control ----
-  // ランダム時間待ち → 40msだけON
-  if (d6On) {
-    if ((int32_t)(now - d6OffMs) >= 0) {
-      digitalWrite(DOUT_PIN_6, LOW);
-      d6On = false;
-      d6NextMs = now + (uint32_t)randWaitMs();
-    }
-  } else {
-    if ((int32_t)(now - d6NextMs) >= 0) {
-      digitalWrite(DOUT_PIN_6, HIGH);
-      d6On = true;
-      d6OffMs = now + (uint32_t)DOUT_ON_MS;
-    }
-  }
-
-  // ---- D7 control ----
-  // D6 と同時に ON しないようにソフトウェアでブロックする
-  if (d7On) {
-    if ((int32_t)(now - d7OffMs) >= 0) {
-      digitalWrite(DOUT_PIN_7, LOW);
-      d7On = false;
-      d7NextMs = now + (uint32_t)randWaitMs();
-    }
-  } else {
-    if ((int32_t)(now - d7NextMs) >= 0) {
-      if (d6On) {
-        d7NextMs = d6OffMs;
-      } else {
-        digitalWrite(DOUT_PIN_7, HIGH);
-        d7On = true;
-        d7OffMs = now + (uint32_t)DOUT_ON_MS;
-      }
-    }
-  }
-
-  if ((int32_t)(now - nextUpdateMs) < 0) return;
-
-  // ---- 揺らぎ計算 ----
-  if (value < 0.5f) {
-    value = value + 2.0f * value * value;
-  } else {
-    float t = 1.0f - value;
-    value = value - 2.0f * t * t;
-  }
-
-  // 周期性を壊すため、端に来たら値を再注入
-  if (value <= (0.0f + threshold) || (1.0f - threshold) <= value) {
-    long r = random((long)(threshold * 1000.0f), (long)(1000.0f - threshold * 1000.0f));
-    value = (float)r / 1000.0f;
-  }
-
-  // 2チャンネルを逆位相で駆動
+  // 起動直後に1回だけ duty を確定させる（未初期化/不定値の防止）
   int value_1 = max_value - dimming_range + (int)(value * dimming_range);
   int value_2 = max_value - (int)(value * dimming_range);
 
   if (value_1 < 0) value_1 = 0; if (value_1 > 255) value_1 = 255;
   if (value_2 < 0) value_2 = 0; if (value_2 > 255) value_2 = 255;
 
-  uint8_t duty1 = pgm_read_byte(&(gamma8[value_1]));
-  uint8_t duty2 = pgm_read_byte(&(gamma8[value_2]));
+  duty1 = pgm_read_byte(&(gamma8[value_1]));
+  duty2 = pgm_read_byte(&(gamma8[value_2]));
 
-  writeCh1(duty1);
-  writeCh2(duty2);
+  d2NextMs = nextUpdateMs + (uint32_t)randWaitMsD2();
+  d4NextMs = nextUpdateMs + (uint32_t)randWaitMsD4();
+}
 
-  // 次回更新タイミングをランダムにずらす
-  uint16_t dt = 80 + (uint16_t)random(0, 46);
-  if (random(0, 3) == 0) {
-    dt += (uint16_t)random(40, 140);
+void loop() {
+  uint32_t now = millis();
+
+  // ---- D2 control ----
+  // ランダム時間待ち → 40msだけON（破裂音）
+  if (d2On) {
+    if ((int32_t)(now - d2OffMs) >= 0) {
+      digitalWrite(DOUT_PIN_2, LOW);
+      d2On = false;
+      d2NextMs = now + (uint32_t)randWaitMsD2();
+    }
+  } else {
+    if ((int32_t)(now - d2NextMs) >= 0) {
+      digitalWrite(DOUT_PIN_2, HIGH);
+      d2On = true;
+      d2OffMs = now + (uint32_t)DOUT_ON_MS;
+    }
   }
-  nextUpdateMs = now + dt;
+
+  // ---- D4 control ----
+  // D2 と同時に ON しないようにソフトウェアでブロックする（折れ音）
+  if (d4On) {
+    if ((int32_t)(now - d4OffMs) >= 0) {
+      digitalWrite(DOUT_PIN_4, LOW);
+      d4On = false;
+      d4NextMs = now + (uint32_t)randWaitMsD4();
+    }
+  } else {
+    if ((int32_t)(now - d4NextMs) >= 0) {
+      if (d2On) {
+        d4NextMs = d2OffMs;
+      } else {
+        digitalWrite(DOUT_PIN_4, HIGH);
+        d4On = true;
+        d4OffMs = now + (uint32_t)DOUT_ON_MS;
+      }
+    }
+  }
+
+  if (!((int32_t)(now - nextUpdateMs) < 0)){
+
+    // ---- 揺らぎ計算 ----
+    if (value < 0.5f) {
+      value = value + 2.0f * value * value;
+    } else {
+      float t = 1.0f - value;
+      value = value - 2.0f * t * t;
+    }
+
+    // 周期性を壊すため、端に来たら値を再注入
+    if (value <= (0.0f + threshold) || (1.0f - threshold) <= value) {
+      long r = random((long)(threshold * 1000.0f), (long)(1000.0f - threshold * 1000.0f));
+      value = (float)r / 1000.0f;
+    }
+
+    // 2チャンネルを逆位相で駆動
+    int value_1 = max_value - dimming_range + (int)(value * dimming_range);
+    int value_2 = max_value - (int)(value * dimming_range);
+
+    if (value_1 < 0) value_1 = 0; if (value_1 > 255) value_1 = 255;
+    if (value_2 < 0) value_2 = 0; if (value_2 > 255) value_2 = 255;
+
+    duty1 = pgm_read_byte(&(gamma8[value_1]));
+    duty2 = pgm_read_byte(&(gamma8[value_2]));
+
+    // 次回更新タイミングをランダムにずらす
+    uint16_t dt = 80 + (uint16_t)random(0, 46);
+    if (random(0, 3) == 0) {
+      dt += (uint16_t)random(40, 140);
+    }
+    nextUpdateMs = now + dt;
+  }
+
+  // 電源投入時のみ、約2秒かけてゆっくりと光らせる（揺らぎは維持してスケールする）
+  uint32_t elapsed = now - bootMs;
+  if (elapsed < 2048UL) {
+    // int16_tで計算してしまい、桁あふれしてしまっていた
+    uint8_t duty1_buf = (uint8_t)(((uint32_t)duty1 * (uint32_t)elapsed) >> 11 );
+    uint8_t duty2_buf = (uint8_t)(((uint32_t)duty2 * (uint32_t)elapsed) >> 11 );
+    writeCh1(duty1_buf);
+    writeCh2(duty2_buf);
+  }
+  else{
+    writeCh1(duty1);
+    writeCh2(duty2);
+  }
 }
